@@ -2,24 +2,20 @@ syntax = "proto3";
 
 package com.upstox.marketdatafeed.rpc.proto;
 
-enum FeedType {
-  Ltpc = 0;
-}
-
-message FullFeed {
-  MarketFullFeed marketFF = 1;
-}
-
-message MarketFullFeed {
-  LTPC ltpc = 1;
-}
-
 message LTPC {
   double ltp = 1;
   int64 ltt = 2;
   double lc = 3;
   double uc = 4;
   double cp = 5;
+}
+
+message MarketFullFeed {
+  LTPC ltpc = 1;
+}
+
+message FullFeed {
+  MarketFullFeed marketFF = 1;
 }
 
 message Feed {
@@ -31,12 +27,3 @@ message FeedResponse {
   string type = 1;
   map<string, Feed> feeds = 2;
 }
-```
-
-Save it in the **same folder as `index.js`**:
-```
-your-project/
-├── index.js
-├── package.json
-├── .gitignore
-└── MarketDataFeed.proto   ← this file
