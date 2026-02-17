@@ -1,17 +1,11 @@
 import WebSocket from "ws"
 
-const UPSTOX_ACCESS_TOKEN = process.env.UPSTOX_ACCESS_TOKEN
+const token = process.env.UPSTOX_ACCESS_TOKEN
 
-console.log("Token exists:", !!UPSTOX_ACCESS_TOKEN)
+console.log("Token exists:", !!token)
 
 const ws = new WebSocket(
-  "wss://api.upstox.com/v2/feed/market-data",
-  {
-    headers: {
-      Authorization: `Bearer ${UPSTOX_ACCESS_TOKEN}`,
-      "Api-Version": "2.0"
-    }
-  }
+  `wss://api.upstox.com/v2/feed/market-data?access_token=${token}`
 )
 
 ws.on("open", () => {
