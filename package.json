@@ -9,6 +9,7 @@
   "dependencies": {
     "@supabase/supabase-js": "^2.x.x",
     "dotenv": "^16.x.x",
+    "node-fetch": "^3.3.2",
     "ws": "^8.x.x"
   }
 }
