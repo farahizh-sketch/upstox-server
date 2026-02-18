@@ -10,8 +10,93 @@ message LTPC {
   double cp = 5;
 }
 
+message MarketOHLC {
+  repeated OHLC ohlc = 1;
+}
+
+message OHLC {
+  string interval = 1;
+  double open = 2;
+  double high = 3;
+  double low = 4;
+  double close = 5;
+  int64 ts = 6;
+  int64 volume = 7;
+}
+
+message DepthMap {
+  repeated Depth bid = 1;
+  repeated Depth ask = 2;
+}
+
+message Depth {
+  int64 quantity = 1;
+  double price = 2;
+  int32 orders = 3;
+}
+
+message MarketFullFeed {
+  LTPC ltpc = 1;
+  MarketOHLC marketOHLC = 2;
+  double eBidQty = 3;
+  double eAskQty = 4;
+  double eBidPrice = 5;
+  double eAskPrice = 6;
+  double atp = 7;
+  int64 vtt = 8;
+  double oi = 9;
+  double poi = 10;
+  int64 lts = 11;
+  DepthMap depthMap = 12;
+}
+
+message IndexFullFeed {
+  LTPC ltpc = 1;
+  MarketOHLC marketOHLC = 2;
+  double eBidQty = 3;
+  double eAskQty = 4;
+  double eBidPrice = 5;
+  double eAskPrice = 6;
+  double atp = 7;
+  int64 vtt = 8;
+}
+
+message FullFeed {
+  MarketFullFeed marketFF = 1;
+  IndexFullFeed indexFF = 2;
+}
+
+message OptionGreeks {
+  double op = 1;
+  double up = 2;
+  double iv = 3;
+  double delta = 4;
+  double theta = 5;
+  double gamma = 6;
+  double vega = 7;
+  double rho = 8;
+}
+
+message MarketQuotes {
+  LTPC ltpc = 1;
+  double atp = 2;
+  int64 vtt = 3;
+  double oi = 4;
+  double poi = 5;
+  int64 lts = 6;
+  double eBidQty = 7;
+  double eAskQty = 8;
+  double eBidPrice = 9;
+  double eAskPrice = 10;
+  DepthMap depthMap = 11;
+  MarketOHLC marketOHLC = 12;
+}
+
 message Feed {
+  FullFeed FF = 1;
   LTPC ltpc = 2;
+  OptionGreeks optionGreeks = 3;
+  MarketQuotes marketQuotes = 4;
 }
 
 message FeedResponse {

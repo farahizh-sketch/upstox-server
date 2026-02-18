@@ -4,6 +4,12 @@ import { v4 as uuidv4 } from "uuid"
 import zlib from "zlib"
 import path from "path"
 import { fileURLToPath } from "url"
+import { createClient } from '@supabase/supabase-js'
+
+const supabase = createClient(
+  process.env.SUPABASE_URL,
+  process.env.SUPABASE_SERVICE_ROLE_KEY
+)
 
 const __filename = fileURLToPath(import.meta.url)
 const __dirname  = path.dirname(__filename)
@@ -22,15 +28,15 @@ const RECONNECT_DELAY      = 5000
 const ATM_DRIFT_THRESHOLD  = STRIKE_GAP
 
 let instrumentMap  = []
+let instrumentLookup = {}
 let currentATM     = null
+let currentSpot    = null
+let currentExpiry  = null
 let ws             = null
 let FeedResponse   = null
 let pingInterval   = null
 let ltpMap         = {}
 
-// ============================================================
-// 1. Spot price
-// ============================================================
 async function getNiftySpot() {
   const url =
     `https://api.upstox.com/v2/market-quote/quotes` +
@@ -45,21 +51,15 @@ async function getNiftySpot() {
 
   const json = await res.json()
   const spotData = json?.data?.["NSE_INDEX:Nifty 50"]
-  if (!spotData) throw new Error(`Spot data missing. Response: ${JSON.stringify(json)}`)
+  if (!spotData) throw new Error(`Spot data missing`)
 
   return spotData.last_price
 }
 
-// ============================================================
-// 2. ATM calculation
-// ============================================================
 function getATM(spot) {
   return Math.round(spot / STRIKE_GAP) * STRIKE_GAP
 }
 
-// ============================================================
-// 3. Generate +/-STRIKE_RANGE strikes around ATM
-// ============================================================
 function generateStrikes(atm) {
   const strikes = []
   for (let i = -STRIKE_RANGE; i <= STRIKE_RANGE; i++) {
@@ -68,9 +68,6 @@ function generateStrikes(atm) {
   return strikes
 }
 
-// ============================================================
-// 4. Load NSE instrument master (same URL that works in Python)
-// ============================================================
 async function loadInstruments() {
   console.log("Loading instruments...")
   const res = await fetch(
@@ -84,9 +81,6 @@ async function loadInstruments() {
   console.log(`Instruments loaded: ${instrumentMap.length}`)
 }
 
-// ============================================================
-// 5. Nearest expiry (expiry field is UNIX ms timestamp)
-// ============================================================
 function getNearestExpiry() {
   const now = Date.now()
 
@@ -97,15 +91,13 @@ function getNearestExpiry() {
       Number(i.expiry) > now
     )
     .map(i => Number(i.expiry))
+    .sort((a, b) => a - b)
 
   if (!niftyExpiries.length) throw new Error("No future NIFTY expiries found")
 
-  return Math.min(...niftyExpiries)
+  return niftyExpiries[0]
 }
 
-// ============================================================
-// 6. Resolve instrument keys for selected strikes + expiry
-// ============================================================
 function getOptionKeys(strikes, expiryMs) {
   const filtered = instrumentMap.filter(i =>
     i.underlying_symbol === "NIFTY" &&
@@ -116,20 +108,19 @@ function getOptionKeys(strikes, expiryMs) {
   )
 
   if (!filtered.length) {
-    throw new Error(
-      `No instruments found for strikes ${strikes} and expiry ${new Date(expiryMs).toISOString()}`
-    )
+    throw new Error(`No instruments found for expiry ${new Date(expiryMs).toISOString()}`)
   }
+
+  instrumentLookup = {}
+  filtered.forEach(inst => {
+    instrumentLookup[inst.instrument_key] = inst
+  })
 
   return filtered.map(i => i.instrument_key)
 }
 
-// ============================================================
-// 7. Load protobuf schema (absolute path)
-// ============================================================
 async function loadProto() {
   const protoPath = path.join(__dirname, "MarketDataFeed.proto")
-  console.log("Loading proto from:", protoPath)
   const root = await protobuf.load(protoPath)
   FeedResponse = root.lookupType(
     "com.upstox.marketdatafeed.rpc.proto.FeedResponse"
@@ -137,33 +128,71 @@ async function loadProto() {
   console.log("Protobuf schema loaded")
 }
 
-// ============================================================
-// 8. Decode and handle incoming WS message
-// ============================================================
-function handleMessage(buffer) {
+async function handleMessage(buffer) {
   try {
+    // Use lenient decoding that skips unknown fields
     const decoded = FeedResponse.decode(new Uint8Array(buffer))
     const feeds   = decoded?.feeds
-    if (!feeds) return
+
+    if (!feeds || Object.keys(feeds).length === 0) {
+      return
+    }
+
+    const now = new Date().toISOString()
+    const batch = []
 
     for (const key in feeds) {
-      const ltp =
-        feeds[key]?.FF?.marketFF?.ltpc?.ltp ??
-        feeds[key]?.ltp?.ltp
+      const feed = feeds[key]
 
-      if (ltp !== undefined && ltp !== null) {
-        ltpMap[key] = ltp
-        console.log(`${key}  LTP: ${ltp}`)
+      // Try all possible LTP paths
+      const ltp = 
+        feed?.ltpc?.ltp ??
+        feed?.FF?.marketFF?.ltpc?.ltp ??
+        feed?.FF?.indexFF?.ltpc?.ltp ??
+        feed?.marketQuotes?.ltpc?.ltp
+
+      if (ltp !== undefined && ltp !== null && ltp > 0) {
+        // Only log if LTP changed significantly (avoid spam)
+        if (!ltpMap[key] || Math.abs(ltpMap[key] - ltp) > 0.01) {
+          ltpMap[key] = ltp
+          console.log(`${key}  LTP: ${ltp}`)
+        }
+
+        const inst = instrumentLookup[key]
+        if (inst) {
+          batch.push({
+            instrument_key: key,
+            strike_price: Number(inst.strike_price),
+            option_type: inst.instrument_type,
+            expiry_date: new Date(currentExpiry).toISOString(),
+            ltp: ltp,
+            spot_price: currentSpot,
+            timestamp: now
+          })
+        }
       }
     }
-  } catch {
-    // non-protobuf frames silently ignored
+
+    if (batch.length > 0) {
+      const { error } = await supabase
+        .from('nifty_option_ltp')
+        .insert(batch)
+
+      if (error) {
+        console.error("Supabase error:", error.message)
+      } else {
+        console.log(`✅ ${batch.length} rows inserted`)
+      }
+    }
+
+  } catch (err) {
+    // Silently skip decode errors - they happen with partial/malformed frames
+    if (err.message && !err.message.includes('index out of range')) {
+      console.error("Decode error:", err.message)
+    }
   }
 }
 
-// ============================================================
-// 9. Clear ping interval safely
-// ============================================================
 function clearPing() {
   if (pingInterval) {
     clearInterval(pingInterval)
@@ -171,9 +200,6 @@ function clearPing() {
   }
 }
 
-// ============================================================
-// 10. Connect WebSocket with heartbeat + ATM drift check
-// ============================================================
 async function connectWebSocket(keys) {
   const authRes = await fetch(
     "https://api.upstox.com/v3/feed/market-data-feed/authorize",
@@ -197,7 +223,7 @@ async function connectWebSocket(keys) {
   ws = new WebSocket(wsUrl)
 
   ws.on("open", () => {
-    console.log("WebSocket connected")
+    console.log("✅ WebSocket connected")
 
     ws.send(JSON.stringify({
       guid: uuidv4(),
@@ -207,9 +233,8 @@ async function connectWebSocket(keys) {
         instrumentKeys: keys
       }
     }))
-    console.log(`Subscribed to ${keys.length} instruments`)
+    console.log(`📡 Subscribed to ${keys.length} instruments`)
 
-    // Heartbeat ping every 20s
     clearPing()
     pingInterval = setInterval(() => {
       if (ws.readyState === WebSocket.OPEN) {
@@ -217,18 +242,18 @@ async function connectWebSocket(keys) {
       }
     }, 20000)
 
-    // ATM drift check every 30s
     setInterval(async () => {
       try {
         const spot   = await getNiftySpot()
+        currentSpot  = spot
         const newATM = getATM(spot)
         if (Math.abs(newATM - currentATM) >= ATM_DRIFT_THRESHOLD) {
-          console.log(`ATM drifted ${currentATM} -> ${newATM}. Reconnecting...`)
+          console.log(`ATM drift: ${currentATM} -> ${newATM}`)
           currentATM = newATM
           ws.close()
         }
       } catch (err) {
-        console.warn("ATM drift check failed:", err.message)
+        console.warn("ATM check failed:", err.message)
       }
     }, 30000)
   })
@@ -236,46 +261,42 @@ async function connectWebSocket(keys) {
   ws.on("message", handleMessage)
 
   ws.on("error", (err) => {
-    console.error("WebSocket error:", err.message)
+    console.error("WS error:", err.message)
   })
 
   ws.on("close", (code) => {
     clearPing()
-    console.log(`WebSocket closed (${code}). Reconnecting in ${RECONNECT_DELAY / 1000}s...`)
+    console.log(`WS closed (${code}). Reconnecting in ${RECONNECT_DELAY / 1000}s...`)
     scheduleRestart()
   })
 }
 
-// ============================================================
-// 11. Delayed restart
-// ============================================================
 function scheduleRestart() {
   setTimeout(start, RECONNECT_DELAY)
 }
 
-// ============================================================
-// MAIN
-// ============================================================
 async function start() {
   try {
-    console.log("Starting NIFTY Option Chain LTP Service")
+    console.log("🚀 Starting NIFTY LTP Service")
 
     if (!FeedResponse) await loadProto()
     if (!instrumentMap.length) await loadInstruments()
 
-    const spot     = await getNiftySpot()
+    const spot      = await getNiftySpot()
+    currentSpot     = spot
     console.log("NIFTY Spot:", spot)
 
-    const atm      = getATM(spot)
-    currentATM     = atm
+    const atm       = getATM(spot)
+    currentATM      = atm
     console.log("ATM Strike:", atm)
 
-    const strikes  = generateStrikes(atm)
-    const expiryMs = getNearestExpiry()
-    console.log("Nearest Expiry:", new Date(expiryMs).toLocaleString())
+    const strikes   = generateStrikes(atm)
+    const expiryMs  = getNearestExpiry()
+    currentExpiry   = expiryMs
+    console.log("Expiry:", new Date(expiryMs).toLocaleString())
 
-    const keys     = getOptionKeys(strikes, expiryMs)
-    console.log("Total instruments to subscribe:", keys.length)
+    const keys      = getOptionKeys(strikes, expiryMs)
+    console.log("Instruments:", keys.length)
 
     await connectWebSocket(keys)
 
