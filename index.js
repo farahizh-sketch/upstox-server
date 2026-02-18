@@ -1,3 +1,22 @@
+import http from "http"
+
+// Dummy HTTP server for Render health checks
+const PORT = process.env.PORT || 3000
+http.createServer((req, res) => {
+  const status = {
+    service: "NIFTY LTP Service",
+    status: ws && ws.readyState === WebSocket.OPEN ? "connected" : "disconnected",
+    atm: currentATM,
+    spot: currentSpot,
+    instruments: Object.keys(ltpMap).length,
+    uptime: process.uptime()
+  }
+  res.writeHead(200, { "Content-Type": "application/json" })
+  res.end(JSON.stringify(status, null, 2))
+}).listen(PORT, () => {
+  console.log(`Health server listening on port ${PORT}`)
+})
+
 import WebSocket from "ws"
 import protobuf from "protobufjs"
 import { v4 as uuidv4 } from "uuid"
