@@ -10,17 +10,8 @@ message LTPC {
   double cp = 5;
 }
 
-message MarketFullFeed {
-  LTPC ltpc = 1;
-}
-
-message FullFeed {
-  MarketFullFeed marketFF = 1;
-}
-
 message Feed {
-  FullFeed FF = 1;
-  LTPC ltp = 11;
+  LTPC ltpc = 2;
 }
 
 message FeedResponse {
